@@ -7,8 +7,8 @@
 
 // This salon needs its own Supabase project — never reuse the barbershop's,
 // or bookings mix and "Reset demo" wipes the other site. See supabase/README.md.
-export const SUPABASE_URL = '';
-export const SUPABASE_ANON_KEY = '';
+export const SUPABASE_URL = 'https://rapyptepzkdwhmcjrnnb.supabase.co';
+export const SUPABASE_ANON_KEY = 'sb_publishable_RLxMh_4YEBW21oPbYXvbQA_gyuP9-vu';
 
 /**
  * DEMO_MODE — true while the app is shown to salons as a demo.
