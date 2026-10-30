@@ -1,0 +1,181 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Design tokens — "plum & rose gold"
+   ink-*  : deep plum surfaces and soft mauve greys
+   cream  : primary text (blush white)
+   gold-* : rose-gold accent (kept the name so components stay unchanged)
+   ============================================================ */
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Cormorant Garamond", ui-serif, Georgia, serif;
+
+  --color-ink-950: #140c12;
+  --color-ink-900: #1b1119;
+  --color-ink-850: #221620;
+  --color-ink-800: #2a1c28;
+  --color-ink-700: #3a2837;
+  --color-ink-600: #4f3a4b;
+  --color-ink-500: #73596e;
+  --color-ink-400: #a38c9e;
+  --color-ink-300: #c7b4c2;
+  --color-ink-200: #e4d7e0;
+  --color-cream: #fbf0f2;
+
+  --color-gold-200: #fbe3dc;
+  --color-gold-300: #f5c4b8;
+  --color-gold-400: #e9a496;
+  --color-gold-500: #d98a7e;
+  --color-gold-600: #b86b62;
+  --color-gold-700: #7a4440;
+
+  --animate-rise: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-fade: fade 0.25s ease-out both;
+  --animate-sheet: sheet 0.38s cubic-bezier(0.2, 0.85, 0.25, 1) both;
+  --animate-pop: pop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+  --animate-shake: shake 0.42s ease-in-out;
+  --animate-toast: toast 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes sheet {
+    from { opacity: 0.6; transform: translateY(100%); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(0.6); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-7px); }
+    40%, 80% { transform: translateX(7px); }
+  }
+  @keyframes toast {
+    from { opacity: 0; transform: translateY(-12px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+  }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Arabic: a font made for Arabic script (loaded only when Arabic is active),
+   and no letter-spacing — spacing breaks the joined Arabic letters */
+html[lang="ar"] {
+  --font-sans: "IBM Plex Sans Arabic", "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "IBM Plex Sans Arabic", "Cormorant Garamond", ui-serif, serif;
+}
+html[lang="ar"] [class*="tracking-"] {
+  letter-spacing: 0 !important;
+}
+/* Cormorant reads best a touch heavier than its regular weight */
+.font-display {
+  font-weight: 500;
+}
+html[lang="ar"] .font-display {
+  font-weight: 600;
+}
+
+html,
+body {
+  background: #140c12;
+  color: #fbf0f2;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
+}
+
+/* Soft rose glow behind the top of a page */
+.page-glow {
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgba(217, 138, 126, 0.16), transparent 60%),
+    radial-gradient(80% 40% at 100% 0%, rgba(217, 138, 126, 0.06), transparent 70%),
+    #140c12;
+}
+
+/* Fine film grain over hero areas for a printed, premium texture */
+.grain {
+  position: relative;
+  isolation: isolate;
+}
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.06;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Rose-gold gradient text */
+.text-brass {
+  background: linear-gradient(180deg, #fbe3dc 0%, #e9a496 45%, #b86b62 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Hairline divider that fades at both ends */
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(245, 196, 184, 0.35), transparent);
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.pb-safe {
+  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+
+select option {
+  background: #221620;
+  color: #fbf0f2;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Right-to-left: what people type (names, services, notes) keeps its own direction */
+html[dir='rtl'] input:not([dir]),
+html[dir='rtl'] textarea:not([dir]) {
+  unicode-bidi: plaintext;
+}

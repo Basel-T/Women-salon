@@ -1,0 +1,547 @@
+// ============================================================
+// BookingFlow.tsx — Service → Barber → Date & time → Review
+// ============================================================
+// The current step comes from ClientApp (browser history), the
+// selections live here. Availability works for any service length
+// and updates live while the client is choosing.
+// ============================================================
+
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { ArrowLeft, Check, Clock, MessageSquare, Sparkles, Users, X } from 'lucide-react';
+import type { User } from '../../types';
+import { t, type MessageKey } from '../../i18n';
+import {
+  addAppointment,
+  firstFreeBarber,
+  freeBarbersRanked,
+  formatPrice,
+  getAnyBarberStarts,
+  getAvailableStarts,
+  getHoursFor,
+  getServiceById,
+  getServices,
+  getSettings,
+  getStylistById,
+  getStylists,
+  getUserUpcoming,
+  isDayOff,
+  lastBookableDate,
+  nextAvailable,
+  useStoreVersion,
+  willAutoConfirm,
+} from '../../store';
+import { Avatar, Button, Card, DateStrip, EmptyState, IconButton, Portrait, cx, textareaCls, toast } from '../../ui';
+import { addDays, endTime, toMin, formatDuration, formatLongDate, relativeDay, todayStr } from '../../lib/time';
+
+const STEPS: MessageKey[] = ['booking.step1', 'booking.step2', 'booking.step3', 'booking.step4'];
+
+/** Special barber choice: whoever is free first at the chosen time */
+const ANY = 'any';
+
+/** Free start times for one barber, or for "any barber" */
+function startsFor(stylistId: string, date: string, duration: number, userId?: string): string[] {
+  const starts = stylistId === ANY ? getAnyBarberStarts(date, duration) : getAvailableStarts(stylistId, date, duration);
+  if (!userId) return starts;
+  // Hide times that clash with the client's own bookings (they can't be in two chairs)
+  const mine = getUserUpcoming(userId).filter((a) => a.date === date);
+  return starts.filter((t) =>
+    mine.every((a) => toMin(t) + duration <= toMin(a.time) || toMin(t) >= toMin(a.time) + a.duration_min)
+  );
+}
+
+/** First date & time that has a free slot (one barber or any) */
+function firstFree(stylistId: string, duration: number): { date: string; time: string } | null {
+  if (stylistId !== ANY) return nextAvailable(stylistId, duration);
+  for (let d = todayStr(); d <= lastBookableDate(); d = addDays(d, 1)) {
+    const s = getAnyBarberStarts(d, duration);
+    if (s.length) return { date: d, time: s[0] };
+  }
+  return null;
+}
+
+interface Props {
+  user: User;
+  step: number;
+  presetServiceId?: string;
+  presetStylistId?: string;
+  onStep: (step: number) => void;
+  onBack: () => void;
+  onClose: () => void;
+  onBooked: (appointmentId: string) => void;
+}
+
+export default function BookingFlow({ user, step, presetServiceId, presetStylistId, onStep, onBack, onClose, onBooked }: Props) {
+  useStoreVersion();
+  const settings = getSettings();
+  const [serviceId, setServiceId] = useState(presetServiceId ?? '');
+  const [stylistId, setStylistId] = useState(presetStylistId ?? '');
+  const [date, setDate] = useState('');
+  const [time, setTime] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [stale, setStale] = useState(false); // chosen time disappeared → show a message
+  const submitting = useRef(false);
+  const [, setTick] = useState(0);
+
+  // Re-check every 15 s, so a time that passes while the client waits is noticed
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 15000);
+    return () => clearInterval(id);
+  }, []);
+
+  const service = getServiceById(serviceId);
+  const isAny = stylistId === ANY;
+  // With "Any barber", the barber is the least busy one free at the chosen time
+  const stylist =
+    isAny && service && date && time ? firstFreeBarber(date, time, service.duration_min) : getStylistById(stylistId);
+
+  // Is the chosen time still free? (someone else booked it, or it passed)
+  const timeGone =
+    !!service && !!time && step >= 2 && !submitting.current &&
+    !startsFor(stylistId, date || todayStr(), service.duration_min, user.id).includes(time);
+
+  useEffect(() => {
+    if (!timeGone) return;
+    setTime('');
+    setStale(true);
+    if (step >= 3) onBack(); // back to the time list
+  }, [timeGone]);
+
+  // Fall back gracefully if a choice disappeared (e.g. the admin hid a service)
+  const current = !service ? 0 : step >= 2 && !stylist && !isAny ? 1 : step >= 3 && (!time || !stylist) ? 2 : step;
+
+  const chooseService = (id: string) => {
+    setServiceId(id);
+    setTime('');
+    if (stylistId) {
+      // Barber already chosen (from "The team") → straight to their first free day
+      const svc = getServiceById(id);
+      setDate(svc ? firstFree(stylistId, svc.duration_min)?.date ?? todayStr() : todayStr());
+      onStep(2);
+    } else onStep(1);
+  };
+
+  const chooseBarber = (id: string, duration: number) => {
+    setStylistId(id);
+    setTime('');
+    setDate(firstFree(id, duration)?.date ?? todayStr());
+    onStep(2);
+  };
+
+  const confirm = async () => {
+    if (!service || !stylist || !date || !time) return;
+    setBusy(true);
+    submitting.current = true;
+    // "Any barber": if the first free barber gets taken meanwhile, try the next one
+    const candidates = isAny ? freeBarbersRanked(date, time, service.duration_min) : [stylist];
+    try {
+      for (const barber of candidates) {
+        try {
+          const appt = await addAppointment(user.id, barber.id, service.id, date, time, note);
+          onBooked(appt.id);
+          return; // stays "submitting" — the flow is closing
+        } catch (e) {
+          if ((e as Error).message !== 'SLOT_TAKEN') throw e;
+        }
+      }
+      submitting.current = false;
+      setTime('');
+      setStale(true);
+      onBack();
+    } catch (e) {
+      submitting.current = false;
+      const msg = (e as Error).message;
+      if (msg === 'LIMIT') {
+        toast(t('booking.errLimit', { n: settings.max_upcoming }), 'error');
+        onClose();
+      } else if (msg === 'CLIENT_OVERLAP') {
+        toast(t('booking.errOverlap'), 'error');
+        setTime('');
+        onBack();
+      } else {
+        toast(t('booking.errFailed'), 'error');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="page-glow flex min-h-dvh flex-col">
+      {/* Header + progress */}
+      <header className="sticky top-0 z-30 border-b border-white/[0.05] bg-ink-950/80 backdrop-blur-xl" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
+        <div className="mx-auto flex h-16 max-w-lg items-center gap-2 px-2">
+          <IconButton label={t('common.back')} onClick={onBack}>
+            <ArrowLeft className="size-5 rtl:-scale-x-100" />
+          </IconButton>
+          <div className="min-w-0 flex-1 text-center">
+            <p className="text-[10.5px] font-semibold uppercase tracking-[0.22em] text-ink-500">
+              {t('booking.stepOf', { n: current + 1, total: STEPS.length })}
+            </p>
+            <p className="truncate font-medium text-cream">{t(STEPS[current])}</p>
+          </div>
+          <IconButton label={t('common.close')} onClick={onClose}>
+            <X className="size-5" />
+          </IconButton>
+        </div>
+        <div className="h-[2px] bg-white/[0.04]">
+          <div
+            className="h-full bg-gradient-to-r from-gold-600 via-gold-400 to-gold-200 transition-all duration-500"
+            style={{ width: `${((current + 1) / STEPS.length) * 100}%` }}
+          />
+        </div>
+      </header>
+
+      <main key={current} className="animate-rise mx-auto w-full max-w-lg flex-1 px-4 pb-8 pt-6">
+        {/* Selection summary */}
+        {current > 0 && service && (
+          <div className="mb-6 flex flex-wrap gap-2">
+            <SummaryChip onClick={() => onStep(0)}>
+              <bdi>{service.name}</bdi> · {formatDuration(service.duration_min)} · {formatPrice(service.price)}
+            </SummaryChip>
+            {current > 1 && isAny && (
+              <SummaryChip onClick={() => onStep(1)}>
+                <Users className="size-4 text-gold-300" /> Any barber
+              </SummaryChip>
+            )}
+            {current > 1 && !isAny && stylist && (
+              <SummaryChip onClick={() => onStep(1)}>
+                <Avatar name={stylist.name} src={stylist.image} size={20} /> <bdi>{stylist.name}</bdi>
+              </SummaryChip>
+            )}
+          </div>
+        )}
+
+        {current === 0 && <ServiceStep selected={serviceId} onChoose={chooseService} />}
+        {current === 1 && service && <BarberStep duration={service.duration_min} selected={stylistId} onChoose={chooseBarber} />}
+        {current === 2 && service && (isAny || stylist) && (
+          <TimeStep
+            userId={user.id}
+            stylistId={isAny ? ANY : stylist!.id}
+            duration={service.duration_min}
+            date={date || todayStr()}
+            time={time}
+            stale={stale}
+            onDate={(d) => {
+              setDate(d);
+              setTime('');
+            }}
+            onTime={(t) => {
+              setStale(false);
+              setTime(t);
+            }}
+          />
+        )}
+        {current === 3 && service && stylist && (
+          <div className="space-y-5">
+            <Card className="overflow-hidden">
+              <div className="flex items-center gap-4 p-5">
+                <Avatar name={stylist.name} src={stylist.image} size={64} className="rounded-2xl" />
+                <div className="min-w-0">
+                  <p className="font-display text-[26px] leading-tight text-cream"><bdi>{service.name}</bdi></p>
+                  <p className="text-sm text-ink-400">
+                    {t('booking.withBarber', { name: stylist.name })}
+                    {isAny && <span className="text-gold-300/90"> · {t('booking.assigned')}</span>}
+                  </p>
+                </div>
+              </div>
+              <div className="hairline" />
+              <dl className="space-y-3 p-5 text-sm">
+                <Line label={t('booking.date')} value={formatLongDate(date)} />
+                <Line label={t('booking.time')} value={`${time} – ${endTime(time, service.duration_min)}`} />
+                <Line label={t('booking.duration')} value={formatDuration(service.duration_min)} />
+                <div className="hairline !my-4" />
+                <div className="flex items-baseline justify-between">
+                  <dt className="text-ink-300">{t('booking.total')}</dt>
+                  <dd className="tnum font-display text-[30px] leading-none text-cream">{formatPrice(service.price)}</dd>
+                </div>
+              </dl>
+            </Card>
+
+            <label className="block">
+              <span className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-400">
+                <MessageSquare className="size-3.5" /> {t('booking.noteLabel')}
+              </span>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                maxLength={300}
+                placeholder={t('booking.notePlaceholder')}
+                className={textareaCls}
+              />
+            </label>
+
+            <p className="flex items-start gap-2.5 text-xs leading-relaxed text-ink-500">
+              <Sparkles className="mt-0.5 size-3.5 shrink-0 text-gold-400" />
+              {t('booking.payAtShop')}{' '}
+              {willAutoConfirm(date, time) ? t('booking.confirmedInstantly') : t('booking.willConfirm', { name: stylist.name.split(' ')[0] })}{' '}
+              {t('booking.cancelAnyTime')}
+            </p>
+          </div>
+        )}
+      </main>
+
+      {/* Sticky footer */}
+      {current === 2 && (
+        <Footer>
+          <Button variant="gold" size="lg" className="w-full" disabled={!time} onClick={() => onStep(3)}>
+            {time ? t('booking.continueAt', { day: relativeDay(date || todayStr()), time }) : t('booking.selectTime')}
+          </Button>
+        </Footer>
+      )}
+      {current === 3 && (
+        <Footer>
+          <Button variant="gold" size="lg" className="w-full" loading={busy} icon={!busy && <Check className="size-[18px]" />} onClick={confirm}>
+            {willAutoConfirm(date, time) ? t('booking.confirmBooking') : t('booking.requestBooking')}
+          </Button>
+        </Footer>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------
+
+function ServiceStep({ selected, onChoose }: { selected: string; onChoose: (id: string) => void }) {
+  const services = getServices();
+  if (services.length === 0) return <EmptyState icon={Clock} title={t('booking.noServices')} text={t('booking.checkBack')} />;
+  return (
+    <div className="space-y-3">
+      {services.map((s) => (
+        <button
+          key={s.id}
+          onClick={() => onChoose(s.id)}
+          className={cx(
+            'w-full rounded-3xl border p-5 text-start transition-all active:scale-[0.99]',
+            selected === s.id
+              ? 'border-gold-400/60 bg-gold-400/[0.06]'
+              : 'border-white/[0.07] bg-ink-900/80 hover:border-white/[0.14] hover:bg-ink-850'
+          )}
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-[17px] font-medium text-cream"><bdi>{s.name}</bdi></p>
+              {s.description && <p className="mt-1 text-sm leading-relaxed text-ink-400"><bdi>{s.description}</bdi></p>}
+            </div>
+            <span className="tnum shrink-0 font-display text-[26px] leading-none text-cream">{formatPrice(s.price)}</span>
+          </div>
+          <p className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-xs text-ink-300">
+            <Clock className="size-3.5" /> {formatDuration(s.duration_min)}
+          </p>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BarberStep({
+  duration,
+  selected,
+  onChoose,
+}: {
+  duration: number;
+  selected: string;
+  onChoose: (id: string, duration: number) => void;
+}) {
+  const team = getStylists();
+  if (team.length === 0) return <EmptyState icon={Clock} title={t('booking.noBarbers')} text={t('booking.checkBack')} />;
+  const anyNext = firstFree(ANY, duration);
+  return (
+    <div className="space-y-3">
+      {/* "Any barber" — first card */}
+      <button
+        onClick={() => onChoose(ANY, duration)}
+        className={cx(
+          'flex w-full items-center gap-4 rounded-3xl border p-3 text-start transition-all active:scale-[0.99]',
+          selected === ANY
+            ? 'border-gold-400/60 bg-gold-400/[0.06]'
+            : 'border-gold-400/25 bg-gradient-to-r from-gold-400/[0.07] to-transparent hover:border-gold-400/45'
+        )}
+      >
+        <div className="grid h-[92px] w-[92px] shrink-0 place-items-center rounded-2xl border border-gold-400/25 bg-ink-850">
+          <Users className="size-8 text-gold-300" strokeWidth={1.4} />
+        </div>
+        <div className="min-w-0 flex-1 py-1 pe-1">
+          <p className="text-[17px] font-medium text-cream">{t('booking.anyBarber')}</p>
+          <p className="text-[13px] text-gold-300/90">{t('booking.fastest')}</p>
+          <p className="mt-1.5 text-[13px] leading-snug text-ink-400">{t('booking.anyBarberText')}</p>
+          <p
+            className={cx(
+              'mt-2.5 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px]',
+              anyNext ? 'bg-emerald-400/10 text-emerald-200' : 'bg-white/[0.04] text-ink-400'
+            )}
+          >
+            <span className={cx('size-1.5 rounded-full', anyNext ? 'bg-emerald-300' : 'bg-ink-500')} />
+            {anyNext ? t('booking.nextFree', { day: relativeDay(anyNext.date), time: anyNext.time }) : t('booking.fullyBooked')}
+          </p>
+        </div>
+      </button>
+
+      {team.map((s) => {
+        const next = nextAvailable(s.id, duration);
+        return (
+          <button
+            key={s.id}
+            onClick={() => onChoose(s.id, duration)}
+            className={cx(
+              'flex w-full gap-4 rounded-3xl border p-3 text-start transition-all active:scale-[0.99]',
+              selected === s.id
+                ? 'border-gold-400/60 bg-gold-400/[0.06]'
+                : 'border-white/[0.07] bg-ink-900/80 hover:border-white/[0.14] hover:bg-ink-850'
+            )}
+          >
+            <Portrait name={s.name} src={s.image} className="w-[92px] shrink-0 rounded-2xl" />
+            <div className="min-w-0 flex-1 py-1 pe-1">
+              <p className="text-[17px] font-medium text-cream"><bdi>{s.name}</bdi></p>
+              <p className="text-[13px] text-gold-300/90"><bdi>{s.title}</bdi></p>
+              {s.bio && <p dir="auto" className="mt-1.5 line-clamp-2 text-[13px] leading-snug text-ink-400 [text-align:match-parent]">{s.bio}</p>}
+              <p
+                className={cx(
+                  'mt-2.5 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px]',
+                  next ? 'bg-emerald-400/10 text-emerald-200' : 'bg-white/[0.04] text-ink-400'
+                )}
+              >
+                <span className={cx('size-1.5 rounded-full', next ? 'bg-emerald-300' : 'bg-ink-500')} />
+                {next ? t('booking.nextFree', { day: relativeDay(next.date), time: next.time }) : t('booking.fullyBooked')}
+              </p>
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function TimeStep({
+  userId,
+  stylistId,
+  duration,
+  date,
+  time,
+  stale,
+  onDate,
+  onTime,
+}: {
+  stale: boolean;
+  userId: string;
+  stylistId: string;
+  duration: number;
+  date: string;
+  time: string;
+  onDate: (d: string) => void;
+  onTime: (t: string) => void;
+}) {
+  const today = todayStr();
+  const last = lastBookableDate();
+  const days: string[] = [];
+  for (let d = today; d <= last; d = addDays(d, 1)) days.push(d);
+
+  const isAny = stylistId === ANY;
+  const items = days.map((d) => {
+    const closed = !getHoursFor(d);
+    const off = !isAny && isDayOff(stylistId, d);
+    const free = closed || off ? 0 : startsFor(stylistId, d, duration, userId).length;
+    return { date: d, disabled: free === 0, note: closed ? t('strip.closed') : off ? t('strip.off') : free === 0 ? t('strip.full') : undefined };
+  });
+
+  const starts = startsFor(stylistId, date, duration, userId);
+  const groups = [
+    { label: t('booking.morning'), times: starts.filter((x) => x < '12:00') },
+    { label: t('booking.afternoon'), times: starts.filter((x) => x >= '12:00' && x < '17:00') },
+    { label: t('booking.evening'), times: starts.filter((x) => x >= '17:00') },
+  ].filter((g) => g.times.length);
+
+  const firstOpen = items.find((i) => !i.disabled)?.date;
+
+  return (
+    <div>
+      <p className="mb-3 font-display text-[26px] text-cream">{formatLongDate(date)}</p>
+      <DateStrip items={items} value={date} onChange={onDate} />
+
+      {stale && (
+        <p role="alert" className="mt-4 flex gap-2.5 rounded-2xl border border-amber-300/25 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-100">
+          <Clock className="mt-0.5 size-4 shrink-0 text-amber-300" />
+          {t('booking.timeGone')}
+        </p>
+      )}
+
+      <div className="mt-6 space-y-6">
+        {groups.length === 0 ? (
+          <Card>
+            <EmptyState
+              icon={Clock}
+              title={
+                !getHoursFor(date)
+                  ? t('booking.shopClosed')
+                  : !isAny && isDayOff(stylistId, date)
+                    ? t('booking.barberOff')
+                    : t('booking.fullyBooked')
+              }
+              text={t('booking.tryAnother')}
+              action={
+                firstOpen && firstOpen !== date ? (
+                  <Button variant="subtle" size="sm" onClick={() => onDate(firstOpen)}>
+                    {t('booking.jumpTo', { day: relativeDay(firstOpen) })}
+                  </Button>
+                ) : undefined
+              }
+            />
+          </Card>
+        ) : (
+          groups.map((g) => (
+            <div key={g.label}>
+              <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-500">{g.label}</p>
+              <div className="grid grid-cols-4 gap-2">
+                {g.times.map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => onTime(t)}
+                    className={cx(
+                      'tnum h-11 rounded-xl border text-[14px] font-medium transition-all active:scale-95',
+                      t === time
+                        ? 'border-transparent bg-cream text-ink-950 shadow-[0_8px_20px_-8px_rgba(251,240,242,0.4)]'
+                        : 'border-white/[0.08] bg-white/[0.02] text-cream hover:border-gold-400/40'
+                    )}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SummaryChip({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] py-1.5 ps-2.5 pe-3 text-[12.5px] text-ink-200 transition hover:border-gold-400/40"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Line({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <dt className="text-ink-400">{label}</dt>
+      <dd className="tnum text-end text-cream">{value}</dd>
+    </div>
+  );
+}
+
+function Footer({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="sticky bottom-0 z-20 border-t border-white/[0.06] bg-ink-950/85 backdrop-blur-xl"
+      style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
+    >
+      <div className="mx-auto max-w-lg px-4 pt-3">{children}</div>
+    </div>
+  );
+}
